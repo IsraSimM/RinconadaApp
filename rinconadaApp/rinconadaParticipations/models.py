@@ -1,54 +1,139 @@
 from django.db import models
-from django.contrib.auth.hashers import make_password, check_password
+from django.contrib.auth.models import User
+from django.core.validators import RegexValidator, FileExtensionValidator
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from django.core.exceptions import ValidationError
+from django.core.mail import EmailMultiAlternatives
+from django.template.loader import render_to_string
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+import secrets
+import string
 
+def validate_image_size(value):
+    max_size = 5 * 1024 * 1024  # 5MB en bytes
+    if value.size > max_size:
+        raise ValidationError(f'El archivo no puede exceder los 5MB. Tamaño actual: {value.size / (1024 * 1024):.2f}MB.')
 
-#Los modelos son las estrucutras de DJAGNO que se encargan de generar las tablas en la base de datos, en este caso se crean los modelos de ciudadanos, admins, participationsDate y participations
-# Creamos nuestro modelo ciudadanos, que lleva los datos basicos del ciudadano, ademas su cargo en la comunidad
-# Las clases, son un contructo de variables que son llamadas atributos y que al complementar nuestra clase la convierten en un objeto
 class Ciudadanos(models.Model):
-    nombre = models.CharField(max_length=50)
-    apellido = models.CharField(max_length=50)
-    cedula = models.CharField(max_length=10)
-    curp = models.CharField(max_length=18, blank=True)
-    telefono = models.CharField(max_length=10, blank=True)
-    email = models.EmailField(blank=True)
-    cargo = models.CharField(max_length=50, default="cdd", choices=[("dlg","Delegado"),("cdd", "Ciudadano"),("cmn", "Comunero"),("vsh", "Vishcal"),("tesorero", "bomberos")])
-    #Aqui retornamos el valor a mostrar en las vistas del panel de Django
+    user = models.OneToOneField(User, on_delete=models.CASCADE, null=True, blank=True)
+    nombre = models.CharField(max_length=100)
+    apellido = models.CharField(max_length=75)
+    cedula = models.CharField(
+        max_length=10,
+        unique=True,
+        validators=[RegexValidator(r'^\d{10}$', 'La cédula debe tener 10 dígitos.')]
+    )
+    curp = models.CharField(
+        max_length=18,
+        unique=True,
+        blank=True,
+        validators=[RegexValidator(r'^[A-Z0-9]{18}$', 'El CURP debe tener 18 caracteres alfanuméricos.')]
+    )
+    telefono = models.CharField(
+        max_length=10,
+        blank=True,
+        validators=[RegexValidator(r'^\d{10}$', 'El teléfono debe tener 10 dígitos.')]
+    )
+    email = models.EmailField(unique=True, blank=True)
+    cargo = models.CharField(
+        max_length=50,
+        default="cdd",
+        choices=[
+            ("dlg", "Presidente"),
+            ("cdd", "Ciudadano"),
+            ("cmn", "Comunero"),
+            ("vsh", "Vishcal"),
+            ("tes", "Tesorero"),
+            ("bmb", "Bombero"),
+        ]
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+
     def __str__(self):
-        return self.nombre
-    
-# Creamos el model de admins en el que se incluiran en automatico los ciudadanos del model anterior que tengan registro con un cargo de "delegado" asi como una clave de acceso que sera modificada y creada por el desarrollador
-class Admins(models.Model):
-    ciudadano = models.ForeignKey(Ciudadanos, on_delete=models.CASCADE)
-    password = models.CharField(max_length=128) # Almacena la contraseña hasheada
+        return f"{self.nombre} {self.apellido}"
 
-    def set_password(self, raw_password):
-        self.password = make_password(raw_password)  # Hashea la contraseña antes de almacenarla
 
-    def compare_password(self, raw_password):
-        return check_password(raw_password, self.password)  # Comprueba si la contraseña es correcta
+@receiver(post_save, sender=Ciudadanos)
+def create_admin_user(sender, instance, created, **kwargs):
+    if instance.cargo == "dlg" and not instance.user:
+        username = f"{instance.nombre.lower()}.{instance.apellido.lower()}".replace(" ", "_")
+        email = instance.email or f"{username}@gmail.com"
+        password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
 
-    def save(self, *args, **kwargs):
-        if not self.pk:
-            # Si es un nuevo objeto, hashea la contraseña antes de guardarla
-            self.set_password(self.password)
-        super().save(*args, **kwargs)
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password
+        )
+        instance.user = user
+        instance.save()
 
-    def __str__(self):
-        return self.ciudadano.nombre
+        # Preparar correo HTML
+        context = {
+            'nombre': instance.nombre,
+            'username': username,
+            'password': password
+        }
 
-# creamos el model de participationsDate en el que se registra la fecha en la que se hace el registro, el tipo de participacion que debe usar un choice que incluya("Faenas y Participaciones"), y una descripcion de la participacion
+        subject = "Tu cuenta en la plataforma ha sido creada"
+        from_email = None
+        to = [email]
+        text_content = f"Tu usuario: {username}\nTu contraseña: {password}"
+        html_content = render_to_string("emails/nueva_cuenta.html", context)
+
+        msg = EmailMultiAlternatives(subject, text_content, from_email, to)
+        msg.attach_alternative(html_content, "text/html")
+
+        try:
+            msg.send()
+        except Exception as e:
+            print(f"Error al enviar correo a {email}: {e}")
+
 class ParticipationsDate(models.Model):
-    fecha = models.DateField()
-    encargado = models.ForeignKey(Admins, default=1, on_delete=models.CASCADE)
-    tipo = models.CharField(max_length=50, default="f", choices=[("f", "Faenas"), ("p", "Participaciones"), ("c", "Coperaciones")])
-    descripcion = models.CharField(max_length=100)
-    def __str__(self):
-        return self.descripcion
+    fecha = models.DateField(db_index=True)
+    encargado = models.ForeignKey('Ciudadanos', on_delete=models.CASCADE, null=True, default=None, limit_choices_to={'cargo': 'dlg'})
+    tipo = models.CharField(
+        max_length=50,
+        default="f",
+        choices=[
+            ("f", "Faenas"),
+            ("cmn", "Comunero"),
+            ("c", "Cooperativo"),
+        ]
+    )
+    descripcion = models.TextField()
 
-# Creamos el model de participations en el que se registran las participaciones de los ciudadanos, se incluye el ciudadano que participa, la fecha en la que participa
-class Participations(models.Model):
-    ciudadano = models.ForeignKey(Ciudadanos, on_delete=models.CASCADE)
-    fecha = models.ForeignKey(ParticipationsDate, on_delete=models.CASCADE)
     def __str__(self):
-        return self.ciudadano.nombre
+        return f"{self.descripcion} ({self.fecha})"
+
+class Participations(models.Model):
+    ciudadano = models.ForeignKey(Ciudadanos, on_delete=models.CASCADE, db_index=True)
+    fecha = models.ForeignKey(ParticipationsDate, on_delete=models.CASCADE, db_index=True)
+    estado = models.CharField(
+        max_length=20,
+        default="confirmada",
+        choices=[
+            ("confirmada", "Confirmada"),
+            ("pendiente", "Pendiente"),
+            ("ausente", "Ausente"),
+        ]
+    )
+    comentario = models.TextField(blank=True)
+    evidencia = models.ImageField(
+        upload_to='evidencias/',
+        blank=True,
+        null=True,
+        validators=[
+            FileExtensionValidator(['jpg', 'jpeg', 'png']),
+            validate_image_size
+        ]
+    )
+    creado = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('ciudadano', 'fecha')
+
+    def __str__(self):
+        return f"{self.ciudadano.nombre} - {self.fecha.descripcion} ({self.estado})"
