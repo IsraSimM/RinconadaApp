@@ -1,16 +1,13 @@
-import React from 'react';
-
-const Input = ({ type = 'text', name, value, onChange, placeholder, className = '' }) => {
+function Input({ type, placeholder, value, onChange, name }) {
   return (
     <input
       type={type}
       name={name}
+      placeholder={placeholder}
       value={value}
       onChange={onChange}
-      placeholder={placeholder}
-      className={`border rounded-md p-2 w-full focus:outline-none focus:ring-2 transition-all duration-300 ${className}`}
+      className="mb-4 p-2 rounded w-full text-black"
     />
-  );
-};
-
-export default Input;
+  )
+}
+export default Input
